@@ -1,0 +1,60 @@
+name: Reusable - Build & Deploy to ECS
+
+on:
+  workflow_call:
+    inputs:
+      aws_region: { required: true, type: string }
+      ecr_repository: { required: true, type: string }
+      ecs_cluster: { required: true, type: string }
+      ecs_service: { required: true, type: string }
+      container_name: { required: true, type: string }
+      task_definition_path: { required: true, type: string }
+      role_to_assume: { required: true, type: string }
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role_to_assume }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          IMAGE_URI="$ECR_REGISTRY/${{ inputs.ecr_repository }}:$IMAGE_TAG"
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "image=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+      - name: Render task definition
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ inputs.task_definition_path }}
+          container-name: ${{ inputs.container_name }}
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ inputs.ecs_cluster }}
+          service: ${{ inputs.ecs_service }}
+          wait-for-service-stability: true

@@ -8,7 +8,6 @@ on:
       ecs_cluster: { required: true, type: string }
       ecs_service: { required: true, type: string }
       container_name: { required: true, type: string }
-      task_definition_path: { required: true, type: string }
       role_to_assume: { required: true, type: string }
 
 permissions:
@@ -43,13 +42,43 @@ jobs:
           docker push "$IMAGE_URI"
           echo "image=$IMAGE_URI" >> "$GITHUB_OUTPUT"
 
-      - name: Render task definition
-        id: render
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: ${{ inputs.task_definition_path }}
-          container-name: ${{ inputs.container_name }}
-          image: ${{ steps.build-image.outputs.image }}
+      - name: Get current task definition from service
+        id: current-td
+        run: |
+          TD_ARN=$(aws ecs describe-services \
+            --cluster "${{ inputs.ecs_cluster }}" \
+            --services "${{ inputs.ecs_service }}" \
+            --query "services[0].taskDefinition" \
+            --output text)
+      
+          echo "task_definition_arn=$TD_ARN" >> $GITHUB_OUTPUT
+      
+      - name: Download task definition JSON (cleaned)
+        id: download-td
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "${{ steps.current-td.outputs.task_definition_arn }}" \
+            --query "taskDefinition" \
+            --output json \
+          | jq 'del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy
+            )' > taskdef.json
+      
+          echo "task_definition_path=taskdef.json" >> $GITHUB_OUTPUT
+      
+            - name: Render task definition
+              id: render
+              uses: aws-actions/amazon-ecs-render-task-definition@v1
+              with:
+                task-definition: ${{ steps.download-td.outputs.task_definition_path }}
+                container-name: ${{ inputs.container_name }}
+                image: ${{ steps.build-image.outputs.image }}
 
       - name: Deploy task definition
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2

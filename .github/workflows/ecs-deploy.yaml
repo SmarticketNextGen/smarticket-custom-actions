@@ -72,13 +72,13 @@ jobs:
       
           echo "task_definition_path=taskdef.json" >> $GITHUB_OUTPUT
       
-            - name: Render task definition
-              id: render
-              uses: aws-actions/amazon-ecs-render-task-definition@v1
-              with:
-                task-definition: ${{ steps.download-td.outputs.task_definition_path }}
-                container-name: ${{ inputs.container_name }}
-                image: ${{ steps.build-image.outputs.image }}
+      - name: Render task definition
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ steps.download-td.outputs.task_definition_path }}
+          container-name: ${{ inputs.container_name }}
+          image: ${{ steps.build-image.outputs.image }}
 
       - name: Deploy task definition
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2

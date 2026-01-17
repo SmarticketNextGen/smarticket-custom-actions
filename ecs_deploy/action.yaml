@@ -1,0 +1,145 @@
+name: "ECS Deploy (Build & Deploy)"
+description: "Build Docker image, push to ECR, fetch current ECS task definition, render updated image, and deploy"
+inputs:
+  aws_region:
+    required: true
+    description: "AWS region (e.g., us-east-1)"
+  ecr_repository:
+    required: true
+    description: "ECR repository name"
+  ecs_cluster:
+    required: true
+    description: "ECS cluster name"
+  ecs_service:
+    required: true
+    description: "ECS service name"
+  container_name:
+    required: true
+    description: "Container name in the ECS task definition to update"
+  role_to_assume:
+    required: true
+    description: "IAM role ARN to assume via GitHub OIDC"
+  env_json:
+    required: false
+    default: "{}"
+    description: "JSON object of docker build args (key/value). Keys must be declared as ARG in Dockerfile to take effect."
+
+outputs:
+  image:
+    description: "Built image URI pushed to ECR"
+    value: ${{ steps.build-image.outputs.image }}
+  task_definition_arn:
+    description: "Original task definition ARN from the ECS service"
+    value: ${{ steps.current-td.outputs.task_definition_arn }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.role_to_assume }}
+        aws-region: ${{ inputs.aws_region }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build Docker args from env_json
+      id: buildargs
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # Write JSON input to a file (safer than inline quoting)
+        cat > env.json <<'EOF'
+        ${{ inputs.env_json }}
+        EOF
+
+        # Convert JSON into a single string of: --build-arg KEY=VALUE ...
+        python - <<'PY'
+        import json, shlex
+        with open("env.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        args = []
+        for k, v in (data or {}).items():
+            if v is None or v == "":
+                continue
+            args.append(f"--build-arg {shlex.quote(str(k))}={shlex.quote(str(v))}")
+
+        open("buildargs.txt", "w", encoding="utf-8").write(" ".join(args))
+        PY
+
+        echo "args=$(cat buildargs.txt)" >> "$GITHUB_OUTPUT"
+
+    - name: Build, tag, and push
+      id: build-image
+      shell: bash
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+
+        IMAGE_URI="$ECR_REGISTRY/${{ inputs.ecr_repository }}:$IMAGE_TAG"
+
+        docker build ${{ steps.buildargs.outputs.args }} -t "$IMAGE_URI" .
+        docker push "$IMAGE_URI"
+
+        echo "image=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+    - name: Get current task definition from service
+      id: current-td
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        TD_ARN="$(aws ecs describe-services \
+          --cluster "${{ inputs.ecs_cluster }}" \
+          --services "${{ inputs.ecs_service }}" \
+          --query "services[0].taskDefinition" \
+          --output text)"
+
+        echo "task_definition_arn=$TD_ARN" >> "$GITHUB_OUTPUT"
+
+    - name: Download task definition JSON (cleaned)
+      id: download-td
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        aws ecs describe-task-definition \
+          --task-definition "${{ steps.current-td.outputs.task_definition_arn }}" \
+          --query "taskDefinition" \
+          --output json \
+        | jq 'del(
+            .taskDefinitionArn,
+            .revision,
+            .status,
+            .requiresAttributes,
+            .compatibilities,
+            .registeredAt,
+            .registeredBy
+          )' > taskdef.json
+
+        echo "task_definition_path=taskdef.json" >> "$GITHUB_OUTPUT"
+
+    - name: Render task definition
+      id: render
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: ${{ steps.download-td.outputs.task_definition_path }}
+        container-name: ${{ inputs.container_name }}
+        image: ${{ steps.build-image.outputs.image }}
+
+    - name: Deploy task definition
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+      with:
+        task-definition: ${{ steps.render.outputs.task-definition }}
+        cluster: ${{ inputs.ecs_cluster }}
+        service: ${{ inputs.ecs_service }}
+        wait-for-service-stability: true

@@ -1,0 +1,89 @@
+name: "S3 Deploy & CloudFront Invalidate"
+description: "Build Node.js application, deploy to S3, and invalidate CloudFront distribution"
+inputs:
+  aws_region:
+    required: true
+    description: "AWS region (e.g., us-east-1)"
+  s3_bucket_name:
+    required: true
+    description: "S3 bucket name for deployment"
+  cloudfront_distribution_id:
+    required: true
+    description: "CloudFront distribution ID for invalidation"
+  role_to_assume:
+    required: true
+    description: "IAM role ARN to assume via GitHub OIDC"
+  env_json:
+    required: false
+    default: "{}"
+    description: "JSON object of environment variables (key/value) for build"
+
+outputs:
+  deployment_status:
+    description: "Status of the deployment"
+    value: ${{ steps.deploy.outputs.status }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: 'npm'
+
+    - name: Install dependencies
+      shell: bash
+      run: npm ci
+
+    - name: Lint
+      shell: bash
+      run: npm run lint
+
+    - name: Type check
+      shell: bash
+      run: npm run check:ts
+
+    - name: Run tests
+      shell: bash
+      run: npm run test
+
+    - name: Build application
+      shell: bash
+      env: ${{ fromJSON(inputs.env_json) }}
+      run: npm run build
+
+    - name: Configure AWS credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.role_to_assume }}
+        aws-region: ${{ inputs.aws_region }}
+
+    - name: Deploy to S3
+      shell: bash
+      run: |
+        set -euo pipefail
+        
+        aws s3 sync dist/ s3://${{ inputs.s3_bucket_name }}/ \
+          --delete \
+          --cache-control "public, max-age=31536000" \
+          --exclude "index.html"
+        
+        aws s3 cp dist/index.html s3://${{ inputs.s3_bucket_name }}/index.html \
+          --cache-control "public, max-age=3600, must-revalidate" \
+          --content-type "text/html"
+
+    - name: Invalidate CloudFront distribution
+      id: deploy
+      shell: bash
+      run: |
+        set -euo pipefail
+        
+        aws cloudfront create-invalidation \
+          --distribution-id ${{ inputs.cloudfront_distribution_id }} \
+          --paths "/*"
+        
+        echo "status=success" >> "$GITHUB_OUTPUT"

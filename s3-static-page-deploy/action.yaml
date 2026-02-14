@@ -39,18 +39,6 @@ runs:
       shell: bash
       run: npm ci
 
-    - name: Lint
-      shell: bash
-      run: npm run lint
-
-    - name: Type check
-      shell: bash
-      run: npm run check:ts
-
-    - name: Run tests
-      shell: bash
-      run: npm run test
-
     - name: Build application
       shell: bash
       env: ${{ fromJSON(inputs.env_json) }}

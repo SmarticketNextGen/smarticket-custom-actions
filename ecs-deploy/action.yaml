@@ -23,11 +23,18 @@ inputs:
     required: false
     default: "{}"
     description: "JSON object of docker build args (key/value). Keys must be declared as ARG in Dockerfile to take effect."
+  wait_for_minutes:
+    required: false
+    default: "13"
+    description: "How long to wait for ECS service stability after deploying, in minutes."
 
 outputs:
   image:
-    description: "Built image URI pushed to ECR"
-    value: ${{ steps.build-image.outputs.image }}
+    description: "Image URI for the commit SHA tag"
+    value: ${{ steps.image.outputs.image }}
+  image_exists:
+    description: "Whether the commit SHA image tag already existed in ECR"
+    value: ${{ steps.image.outputs.exists }}
   task_definition_arn:
     description: "Original task definition ARN from the ECS service"
     value: ${{ steps.current-td.outputs.task_definition_arn }}
@@ -35,9 +42,6 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
     - name: Configure AWS credentials (OIDC)
       uses: aws-actions/configure-aws-credentials@v4
       with:
@@ -48,8 +52,43 @@ runs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
+    - name: Resolve image URI and check ECR tag
+      id: image
+      shell: bash
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+
+        IMAGE_URI="$ECR_REGISTRY/${{ inputs.ecr_repository }}:$IMAGE_TAG"
+
+        echo "image=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+        if aws ecr describe-images \
+          --repository-name "${{ inputs.ecr_repository }}" \
+          --image-ids imageTag="$IMAGE_TAG" \
+          >/dev/null 2>ecr-check.err; then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::Image $IMAGE_URI already exists in ECR. Skipping build, push, and ECS deploy."
+        else
+          status=$?
+          if grep -q "ImageNotFoundException" ecr-check.err; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Image $IMAGE_URI does not exist in ECR. Continuing with build and deploy."
+          else
+            cat ecr-check.err >&2
+            exit "$status"
+          fi
+        fi
+
+    - name: Checkout
+      if: steps.image.outputs.exists != 'true'
+      uses: actions/checkout@v4
+
     - name: Build Docker args from env_json
       id: buildargs
+      if: steps.image.outputs.exists != 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -78,14 +117,12 @@ runs:
 
     - name: Build, tag, and push
       id: build-image
+      if: steps.image.outputs.exists != 'true'
       shell: bash
       env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        IMAGE_TAG: ${{ github.sha }}
+        IMAGE_URI: ${{ steps.image.outputs.image }}
       run: |
         set -euo pipefail
-
-        IMAGE_URI="$ECR_REGISTRY/${{ inputs.ecr_repository }}:$IMAGE_TAG"
 
         docker build ${{ steps.buildargs.outputs.args }} -t "$IMAGE_URI" .
         docker push "$IMAGE_URI"
@@ -94,6 +131,7 @@ runs:
 
     - name: Get current task definition from service
       id: current-td
+      if: steps.image.outputs.exists != 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -108,6 +146,7 @@ runs:
 
     - name: Download task definition JSON (cleaned)
       id: download-td
+      if: steps.image.outputs.exists != 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -130,16 +169,19 @@ runs:
 
     - name: Render task definition
       id: render
+      if: steps.image.outputs.exists != 'true'
       uses: aws-actions/amazon-ecs-render-task-definition@v1
       with:
         task-definition: ${{ steps.download-td.outputs.task_definition_path }}
         container-name: ${{ inputs.container_name }}
-        image: ${{ steps.build-image.outputs.image }}
+        image: ${{ steps.image.outputs.image }}
 
     - name: Deploy task definition
+      if: steps.image.outputs.exists != 'true'
       uses: aws-actions/amazon-ecs-deploy-task-definition@v2
       with:
         task-definition: ${{ steps.render.outputs.task-definition }}
         cluster: ${{ inputs.ecs_cluster }}
         service: ${{ inputs.ecs_service }}
         wait-for-service-stability: true
+        wait-for-minutes: ${{ inputs.wait_for_minutes }}

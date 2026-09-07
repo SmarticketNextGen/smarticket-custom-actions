@@ -70,7 +70,7 @@ runs:
           --image-ids imageTag="$IMAGE_TAG" \
           >/dev/null 2>ecr-check.err; then
           echo "exists=true" >> "$GITHUB_OUTPUT"
-          echo "::notice::Image $IMAGE_URI already exists in ECR. Skipping build, push, and ECS deploy."
+          echo "::notice::Image $IMAGE_URI is already in ECR. Skipping the build; the deploy still runs."
         else
           status=$?
           if grep -q "ImageNotFoundException" ecr-check.err; then
@@ -131,7 +131,6 @@ runs:
 
     - name: Get current task definition from service
       id: current-td
-      if: steps.image.outputs.exists != 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -146,7 +145,6 @@ runs:
 
     - name: Download task definition JSON (cleaned)
       id: download-td
-      if: steps.image.outputs.exists != 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -169,7 +167,6 @@ runs:
 
     - name: Render task definition
       id: render
-      if: steps.image.outputs.exists != 'true'
       uses: aws-actions/amazon-ecs-render-task-definition@v1
       with:
         task-definition: ${{ steps.download-td.outputs.task_definition_path }}
@@ -177,7 +174,6 @@ runs:
         image: ${{ steps.image.outputs.image }}
 
     - name: Deploy task definition
-      if: steps.image.outputs.exists != 'true'
       uses: aws-actions/amazon-ecs-deploy-task-definition@v2
       with:
         task-definition: ${{ steps.render.outputs.task-definition }}

@@ -181,3 +181,8 @@ runs:
         service: ${{ inputs.ecs_service }}
         wait-for-service-stability: true
         wait-for-minutes: ${{ inputs.wait_for_minutes }}
+        # The ECS waiter defaults to a 600s maximum delay, and smithy's poller returns that delay
+        # unclamped once the backoff passes the ceiling: from the 7th poll on it asks whether it can
+        # sleep ten minutes and still meet the deadline, decides it cannot, and reports TIMEOUT. That
+        # is why every timeout carried "200: OK": 7 and none of them lasted the configured 13 minutes.
+        wait-max-delay-seconds: 15
